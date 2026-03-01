@@ -1,0 +1,8 @@
+[profile.default]
+src = "cre-workflow/contracts"
+out = "out"
+libs = ["lib"]
+solc_version = "0.8.19"
+
+[rpc_endpoints]
+base_sepolia = "${BASE_SEPOLIA_RPC}"
