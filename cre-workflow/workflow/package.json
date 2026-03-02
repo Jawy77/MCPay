@@ -1,0 +1,18 @@
+{
+  "name": "shield-verify-workflow",
+  "version": "0.1.0",
+  "description": "ShieldPay CRE Workflow: verified agent payments for premium MCP tools",
+  "scripts": {
+    "postinstall": "bunx cre-setup",
+    "simulate": "cre workflow simulate shield-verify --target staging-settings",
+    "simulate:broadcast": "cre workflow simulate shield-verify --target staging-settings --broadcast"
+  },
+  "dependencies": {
+    "@chainlink/cre-sdk": "^1.1.2",
+    "viem": "^2.21.0",
+    "zod": "^3.24.0"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.2.0"
+  }
+}
