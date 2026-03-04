@@ -1,0 +1,19 @@
+{
+  "name": "shieldpay-sdk",
+  "version": "0.1.0",
+  "description": "ShieldPay TypeScript SDK: shield-aware MCP client, spending policies, and attestation reader",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch"
+  },
+  "dependencies": {
+    "viem": "^2.21.0"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.2.0",
+    "typescript": "^5.5.0"
+  }
+}
