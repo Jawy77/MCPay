@@ -1,0 +1,17 @@
+{
+  "name": "shieldpay-demo-mcp",
+  "version": "0.1.0",
+  "description": "ShieldPay demo: x402-priced premium security scan MCP server",
+  "type": "module",
+  "scripts": {
+    "start": "bun run src/server.ts",
+    "dev": "bun --watch run src/server.ts"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.0"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.2.0",
+    "typescript": "^5.5.0"
+  }
+}
