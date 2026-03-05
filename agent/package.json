@@ -1,0 +1,18 @@
+{
+  "name": "shieldpay-agent",
+  "version": "0.1.0",
+  "description": "OpenClaw: Telegram bot agent using ShieldPay SDK with Claude backbone",
+  "type": "module",
+  "scripts": {
+    "start": "bun run src/telegram-bot.ts",
+    "dev": "bun --watch run src/telegram-bot.ts"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.39.0",
+    "viem": "^2.21.0"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.2.0",
+    "typescript": "^5.5.0"
+  }
+}
