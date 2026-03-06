@@ -1,23 +1,36 @@
 /**
  * ShieldPay Demo MCP Server
  *
- * A premium security scan MCP server priced via x402 micropayments.
- * Exposes MCP tools for smart contract security analysis.
+ * A premium security scan MCP server priced via x402 micropayments on Base Sepolia.
+ * The /mcp endpoint requires USDC payment via x402 protocol before returning results.
  *
- * This server is called by the CRE workflow during Step 3 (Service Delivery).
- * The X-ShieldPay-Attestation header signals that the call is being attested.
+ * Flow:
+ *   1. Client POSTs to /mcp
+ *   2. x402 middleware returns 402 with payment requirements
+ *   3. Client signs USDC payment (via @x402/axios or similar)
+ *   4. Client retries with payment header
+ *   5. Facilitator settles payment, server returns MCP result
+ *
+ * Environment variables:
+ *   PAYEE_WALLET_ADDRESS  — Wallet to receive x402 payments
+ *   MCP_PORT              — Server port (default: 3001)
  *
  * Run: bun run src/server.ts
- * Listens on: http://localhost:3001/mcp
  */
 
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
-import { z } from "zod";
+import { Hono } from "hono";
+import { paymentMiddlewareFromConfig } from "@x402/hono";
+import { ExactEvmScheme } from "@x402/evm/exact/server";
+import { HTTPFacilitatorClient } from "@x402/core/server";
 
 const PORT = parseInt(process.env.MCP_PORT ?? "3001");
+const PAYEE_ADDRESS = process.env.PAYEE_WALLET_ADDRESS ?? "0x0000000000000000000000000000000000000000";
+const FACILITATOR_URL = process.env.FACILITATOR_URL ?? "https://x402.org/facilitator";
 
-// Known vulnerability patterns for demo purposes
+// ============================================================================
+// VULNERABILITY ANALYSIS ENGINE
+// ============================================================================
+
 const VULNERABILITY_DB: Record<string, { severity: string; description: string; recommendation: string }> = {
   reentrancy: {
     severity: "CRITICAL",
@@ -46,7 +59,6 @@ const VULNERABILITY_DB: Record<string, { severity: string; description: string; 
   },
 };
 
-// Simulated security analysis engine
 function analyzeContract(sourceCode: string): {
   vulnerabilities: Array<{ pattern: string; severity: string; line: number; description: string; recommendation: string }>;
   riskScore: number;
@@ -67,7 +79,6 @@ function analyzeContract(sourceCode: string): {
     const lower = line.toLowerCase();
 
     if (lower.includes(".call{") || lower.includes(".call(")) {
-      // Check for reentrancy pattern: external call possibly before state update
       vulnerabilities.push({ pattern: "reentrancy", line: lineNum, ...VULNERABILITY_DB["reentrancy"] });
     }
     if (lower.includes("tx.origin")) {
@@ -95,157 +106,121 @@ function analyzeContract(sourceCode: string): {
   return { vulnerabilities, riskScore, summary };
 }
 
-// Create MCP server
-const server = new McpServer({
-  name: "ShieldPay Security Scanner",
-  version: "0.1.0",
+// ============================================================================
+// HONO APP + x402 MIDDLEWARE
+// ============================================================================
+
+const app = new Hono();
+
+// x402 payment middleware — gates POST /mcp behind USDC payment on Base Sepolia
+const facilitatorClient = new HTTPFacilitatorClient({
+  url: FACILITATOR_URL,
 });
 
-// Tool: security_scan — Analyze a Solidity smart contract for vulnerabilities
-server.tool(
-  "security_scan",
-  "Analyze a Solidity smart contract for common vulnerabilities. Costs 0.05 USDC via x402.",
-  {
-    source_code: z.string().describe("Solidity source code to analyze"),
-    contract_name: z.string().optional().describe("Name of the contract (for reporting)"),
-  },
-  async ({ source_code, contract_name }) => {
-    const name = contract_name ?? "Unknown";
-    const result = analyzeContract(source_code);
-
-    const report = [
-      `# Security Scan Report: ${name}`,
-      ``,
-      `**Risk Score:** ${result.riskScore}/100`,
-      `**Issues Found:** ${result.vulnerabilities.length}`,
-      ``,
-      `## Summary`,
-      result.summary,
-      ``,
-      `## Vulnerabilities`,
-      ...result.vulnerabilities.map(
-        (v, i) =>
-          `### ${i + 1}. [${v.severity}] ${v.pattern} (line ${v.line})\n${v.description}\n**Fix:** ${v.recommendation}`
-      ),
-      ``,
-      result.vulnerabilities.length === 0 ? "No vulnerabilities detected." : "",
-      ``,
-      `---`,
-      `*Powered by ShieldPay Security Scanner — verified via CRE attestation*`,
-    ].join("\n");
-
-    return {
-      content: [{ type: "text" as const, text: report }],
-    };
-  }
-);
-
-// Tool: reputation_check — Check an address's on-chain reputation
-server.tool(
-  "reputation_check",
-  "Check the on-chain reputation of a wallet or contract address. Costs 0.01 USDC via x402.",
-  {
-    address: z.string().describe("Ethereum address to check"),
-  },
-  async ({ address }) => {
-    // Demo: return simulated reputation data
-    const report = [
-      `# Reputation Report: ${address}`,
-      ``,
-      `**Status:** Active`,
-      `**First Seen:** 2025-09-15`,
-      `**Transaction Count:** ${Math.floor(Math.random() * 500) + 10}`,
-      `**Risk Level:** Low`,
-      `**Associated Protocols:** Uniswap, Aave, Base Bridge`,
-      `**Flags:** None`,
-      ``,
-      `---`,
-      `*Powered by ShieldPay Security Scanner*`,
-    ].join("\n");
-
-    return {
-      content: [{ type: "text" as const, text: report }],
-    };
-  }
-);
-
-// Start the HTTP transport
-async function main() {
-  const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
-
-  const httpServer = Bun.serve({
-    port: PORT,
-    async fetch(req) {
-      const url = new URL(req.url);
-
-      // Health check
-      if (url.pathname === "/health") {
-        return new Response(JSON.stringify({ status: "ok", server: "ShieldPay Demo MCP" }), {
-          headers: { "Content-Type": "application/json" },
-        });
-      }
-
-      // MCP endpoint
-      if (url.pathname === "/mcp" && req.method === "POST") {
-        const body = await req.json();
-        const shieldPayHeader = req.headers.get("X-ShieldPay-Attestation");
-
-        if (shieldPayHeader) {
-          console.log(`[ShieldPay MCP] Attested call received (status: ${shieldPayHeader})`);
-        }
-
-        console.log(`[ShieldPay MCP] Request: ${JSON.stringify(body).slice(0, 200)}`);
-
-        // Handle JSON-RPC format from CRE workflow
-        if (body.jsonrpc === "2.0" && body.method === "tools/call") {
-          const { name, arguments: args } = body.params;
-          let result;
-
-          if (name === "security_scan") {
-            const analysis = analyzeContract(args.source_code ?? "");
-            const contractName = args.contract_name ?? "Unknown";
-            result = {
-              content: [
-                {
-                  type: "text",
-                  text: `# Security Scan: ${contractName}\nRisk Score: ${analysis.riskScore}/100\nIssues: ${analysis.vulnerabilities.length}\n\n${analysis.summary}`,
-                },
-              ],
-            };
-          } else if (name === "reputation_check") {
-            result = {
-              content: [
-                {
-                  type: "text",
-                  text: `# Reputation: ${args.address}\nStatus: Active\nRisk Level: Low`,
-                },
-              ],
-            };
-          } else {
-            result = { content: [{ type: "text", text: `Unknown tool: ${name}` }] };
-          }
-
-          return new Response(
-            JSON.stringify({ jsonrpc: "2.0", result, id: body.id }),
-            { headers: { "Content-Type": "application/json" } }
-          );
-        }
-
-        return new Response(JSON.stringify({ error: "Invalid request" }), {
-          status: 400,
-          headers: { "Content-Type": "application/json" },
-        });
-      }
-
-      return new Response("Not Found", { status: 404 });
+app.use(
+  paymentMiddlewareFromConfig(
+    {
+      "POST /mcp": {
+        accepts: {
+          scheme: "exact",
+          price: "$0.001",
+          network: "eip155:84532",      // Base Sepolia
+          payTo: PAYEE_ADDRESS,
+          maxTimeoutSeconds: 120,
+        },
+        description: "Premium smart contract security scan via ShieldPay MCP",
+      },
     },
+    facilitatorClient,
+    [{ network: "eip155:84532", server: new ExactEvmScheme() }],
+  ),
+);
+
+// ============================================================================
+// ROUTES
+// ============================================================================
+
+// Health check (free — no payment required)
+app.get("/health", (c) => {
+  return c.json({
+    status: "ok",
+    server: "ShieldPay Demo MCP",
+    x402: true,
+    payee: PAYEE_ADDRESS,
+    network: "base-sepolia",
+    facilitator: FACILITATOR_URL,
   });
+});
 
-  console.log(`[ShieldPay MCP] Demo security scanner running on http://localhost:${PORT}`);
-  console.log(`[ShieldPay MCP] MCP endpoint: http://localhost:${PORT}/mcp`);
-  console.log(`[ShieldPay MCP] Health check: http://localhost:${PORT}/health`);
+// MCP endpoint — x402-gated
+app.post("/mcp", async (c) => {
+  const body = await c.req.json();
+  const shieldPayHeader = c.req.header("X-ShieldPay-Attestation");
 
-  await server.connect(transport);
-}
+  if (shieldPayHeader) {
+    console.log(`[ShieldPay MCP] Attested call received (status: ${shieldPayHeader})`);
+  }
 
-main().catch(console.error);
+  console.log(`[ShieldPay MCP] PAID request received`);
+  console.log(`[ShieldPay MCP] Request: ${JSON.stringify(body).slice(0, 200)}`);
+
+  // Handle JSON-RPC format from CRE workflow / agent
+  if (body.jsonrpc === "2.0" && body.method === "tools/call") {
+    const { name, arguments: args } = body.params;
+    let result;
+
+    if (name === "security_scan") {
+      const analysis = analyzeContract(args.source_code ?? "");
+      const contractName = args.contract_name ?? "Unknown";
+
+      const report = [
+        `# Security Scan: ${contractName}`,
+        `Risk Score: ${analysis.riskScore}/100`,
+        `Issues: ${analysis.vulnerabilities.length}`,
+        ``,
+        analysis.summary,
+        ``,
+        ...analysis.vulnerabilities.map(
+          (v, i) =>
+            `## ${i + 1}. [${v.severity}] ${v.pattern} (line ${v.line})\n${v.description}\n**Fix:** ${v.recommendation}`
+        ),
+        ``,
+        `---`,
+        `*Powered by ShieldPay — verified via x402 + CRE attestation*`,
+      ].join("\n");
+
+      result = { content: [{ type: "text", text: report }] };
+    } else if (name === "reputation_check") {
+      result = {
+        content: [
+          {
+            type: "text",
+            text: `# Reputation: ${args.address}\nStatus: Active\nRisk Level: Low\nTransactions: ${Math.floor(Math.random() * 500) + 10}\nFlags: None`,
+          },
+        ],
+      };
+    } else {
+      result = { content: [{ type: "text", text: `Unknown tool: ${name}` }] };
+    }
+
+    return c.json({ jsonrpc: "2.0", result, id: body.id });
+  }
+
+  return c.json({ error: "Invalid request" }, 400);
+});
+
+// ============================================================================
+// START
+// ============================================================================
+
+console.log(`[ShieldPay MCP] x402-gated security scanner`);
+console.log(`[ShieldPay MCP] Payee: ${PAYEE_ADDRESS}`);
+console.log(`[ShieldPay MCP] Network: Base Sepolia (eip155:84532)`);
+console.log(`[ShieldPay MCP] Facilitator: ${FACILITATOR_URL}`);
+console.log(`[ShieldPay MCP] Price: $0.001 USDC per call`);
+console.log(`[ShieldPay MCP] Listening on http://localhost:${PORT}`);
+
+export default {
+  port: PORT,
+  fetch: app.fetch,
+};
