@@ -1,21 +1,24 @@
 {
   "name": "shieldpay-demo-mcp",
   "version": "0.1.0",
-  "description": "ShieldPay demo: x402-priced premium security scan MCP server",
+  "description": "Demo premium MCP server with x402 pricing for ShieldPay hackathon",
   "type": "module",
   "scripts": {
-    "start": "bun run src/server.ts",
-    "dev": "bun --watch run src/server.ts"
+    "start": "npx tsx src/server.ts",
+    "dev": "npx tsx watch src/server.ts"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.12.0",
-    "@x402/hono": "^2.6.0",
+    "express": "^4.21.0",
+    "@x402/express": "^2.6.0",
     "@x402/evm": "^2.6.0",
     "@x402/core": "^2.6.0",
-    "hono": "^4.7.0"
+    "@modelcontextprotocol/sdk": "^1.12.0",
+    "zod": "^3.24.0"
   },
   "devDependencies": {
-    "@types/bun": "^1.2.0",
+    "tsx": "^4.19.0",
+    "@types/express": "^5.0.0",
+    "@types/node": "^22.0.0",
     "typescript": "^5.5.0"
   }
 }
