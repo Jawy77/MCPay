@@ -1,371 +1,353 @@
-/**
- * OpenClaw — ShieldPay Telegram Bot Agent
- *
- * An autonomous AI agent (Groq backbone) that:
- * 1. Receives security analysis requests via Telegram
- * 2. Pays for premium MCP tools via x402 (automatic 402 → payment → retry)
- * 3. Logs txHash for CRE workflow attestation
- * 4. Returns verified results to the user
- *
- * Environment variables:
- *   TELEGRAM_BOT_TOKEN    — Telegram Bot API token
- *   GROQ_API_KEY          — Groq API key
- *   SHIELD_VAULT_ADDRESS  — ShieldVault contract address
- *   CRE_WORKFLOW_URL      — CRE workflow HTTP trigger URL
- *   AGENT_PRIVATE_KEY     — Agent wallet private key (for x402 payments)
- *   BASE_SEPOLIA_RPC      — Base Sepolia RPC URL
- *   MCP_SERVER_URL        — MCP server URL (default: http://localhost:3001)
- *
- * Run: bun run src/telegram-bot.ts
- */
+import TelegramBot from 'node-telegram-bot-api';
+import Groq from 'groq-sdk';
+import axios from 'axios';
+import { wrapAxiosWithPayment, x402Client, decodePaymentResponseHeader } from '@x402/axios';
+import { ExactEvmScheme, toClientEvmSigner } from '@x402/evm';
+import { privateKeyToAccount } from 'viem/accounts';
+import { createPublicClient, http } from 'viem';
+import { baseSepolia } from 'viem/chains';
+import { config } from 'dotenv';
+import { resolve } from 'path';
 
-import Groq from "groq-sdk";
-import axios from "axios";
-import { wrapAxiosWithPayment, x402Client, decodePaymentResponseHeader } from "@x402/axios";
-import { ExactEvmScheme, toClientEvmSigner } from "@x402/evm";
-import { privateKeyToAccount } from "viem/accounts";
-import { createPublicClient, http, type Address } from "viem";
-import { baseSepolia } from "viem/chains";
+// Load .env from project root
+config({ path: resolve(import.meta.dirname ?? '.', '..', '.env') });
 
 // ============================================================================
 // CONFIG
 // ============================================================================
 
-const TELEGRAM_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
-const GROQ_API_KEY = process.env.GROQ_API_KEY;
-const VAULT_ADDRESS = (process.env.SHIELD_VAULT_ADDRESS ?? "0x0000000000000000000000000000000000000000") as Address;
-const CRE_WORKFLOW_URL = process.env.CRE_WORKFLOW_URL ?? "http://localhost:8080/shield-verify";
-const AGENT_PRIVATE_KEY = process.env.AGENT_PRIVATE_KEY;
-const BASE_SEPOLIA_RPC = process.env.BASE_SEPOLIA_RPC ?? "https://sepolia.base.org";
-const MCP_SERVER_URL = process.env.MCP_SERVER_URL ?? "http://localhost:3001";
+const TELEGRAM_TOKEN = process.env.TELEGRAM_BOT_TOKEN!;
+const GROQ_KEY = process.env.GROQ_API_KEY!;
+const LLM_MODEL = process.env.LLM_MODEL || 'llama-3.3-70b-versatile';
+const MCP_SERVER = process.env.MCP_SERVER_URL || 'http://localhost:3001';
+const AGENT_PRIVATE_KEY = process.env.AGENT_PRIVATE_KEY!;
+const BASE_SEPOLIA_RPC = process.env.BASE_SEPOLIA_RPC || 'https://sepolia.base.org';
 
-if (!TELEGRAM_TOKEN) {
-  console.error("[OpenClaw] Missing TELEGRAM_BOT_TOKEN");
-  process.exit(1);
-}
-
-if (!GROQ_API_KEY) {
-  console.error("[OpenClaw] Missing GROQ_API_KEY");
-  process.exit(1);
-}
-
-if (!AGENT_PRIVATE_KEY) {
-  console.error("[OpenClaw] Missing AGENT_PRIVATE_KEY (needed for x402 payments)");
-  process.exit(1);
-}
+if (!TELEGRAM_TOKEN) { console.error('TELEGRAM_BOT_TOKEN missing in .env'); process.exit(1); }
+if (!GROQ_KEY) { console.error('GROQ_API_KEY missing in .env'); process.exit(1); }
+if (!AGENT_PRIVATE_KEY) { console.error('AGENT_PRIVATE_KEY missing in .env (needed for x402 payments)'); process.exit(1); }
 
 // ============================================================================
-// x402 PAYMENT CLIENT
+// x402 PAYMENT CLIENT — auto-pays USDC on Base Sepolia
 // ============================================================================
 
 const account = privateKeyToAccount(AGENT_PRIVATE_KEY as `0x${string}`);
-console.log(`[OpenClaw] Agent wallet: ${account.address}`);
 
-// Create viem public client for Base Sepolia (needed for x402 readContract)
 const publicClient = createPublicClient({
   chain: baseSepolia,
   transport: http(BASE_SEPOLIA_RPC),
 });
 
-// Create x402 signer with readContract capability
 const evmSigner = toClientEvmSigner(account, publicClient as any);
 
-// Create x402 client that auto-handles 402 Payment Required
 const x402PaymentClient = new x402Client()
-  .register("eip155:84532", new ExactEvmScheme(evmSigner));  // Base Sepolia
+  .register('eip155:84532', new ExactEvmScheme(evmSigner));
 
+// Axios instance that auto-handles 402 → payment → retry
 const mcpApi = wrapAxiosWithPayment(
-  axios.create({
-    baseURL: MCP_SERVER_URL,
-    timeout: 60_000,
-  }),
+  axios.create({ baseURL: MCP_SERVER, timeout: 60_000 }),
   x402PaymentClient,
 );
 
 // ============================================================================
-// TELEGRAM API HELPERS
+// INIT
 // ============================================================================
 
-const TG_API = `https://api.telegram.org/bot${TELEGRAM_TOKEN}`;
+const bot = new TelegramBot(TELEGRAM_TOKEN, { polling: true });
+const groq = new Groq({ apiKey: GROQ_KEY });
 
-async function sendMessage(chatId: number, text: string, parseMode: string = "Markdown"): Promise<void> {
-  await fetch(`${TG_API}/sendMessage`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      chat_id: chatId,
-      text,
-      parse_mode: parseMode,
-    }),
+console.log(`\n  ShieldPay Agent (OpenClaw)`);
+console.log(`   LLM: Groq/${LLM_MODEL}`);
+console.log(`   MCP: ${MCP_SERVER}`);
+console.log(`   Agent wallet: ${account.address}`);
+console.log(`   Payments: x402 auto-pay (Base Sepolia USDC)`);
+console.log(`   Bot: Starting Telegram polling...\n`);
+
+// ============================================================================
+// MCP CLIENT (x402-paid)
+// ============================================================================
+
+async function callMCP(toolName: string, args: Record<string, unknown>): Promise<{ data: any; txHash: string | null }> {
+  console.log(`[MCP] Calling ${toolName} with:`, args);
+
+  const res = await mcpApi.post('/mcp', {
+    jsonrpc: '2.0',
+    method: 'tools/call',
+    params: { name: toolName, arguments: args },
+    id: Date.now(),
   });
+
+  // Extract payment txHash from x402 response headers
+  let txHash: string | null = null;
+  const paymentHeader = res.headers['x-payment-response'];
+  if (paymentHeader) {
+    try {
+      const decoded = decodePaymentResponseHeader(paymentHeader);
+      txHash = (decoded as any)?.txHash ?? (decoded as any)?.transaction ?? paymentHeader;
+      console.log(`[x402] Payment settled — txHash: ${txHash}`);
+      console.log(`[x402] Full receipt:`, JSON.stringify(decoded));
+    } catch {
+      txHash = paymentHeader;
+      console.log(`[x402] Payment header (raw): ${paymentHeader}`);
+    }
+  }
+
+  const data = res.data;
+
+  if (data.error) {
+    throw new Error(`MCP error: ${data.error.message}`);
+  }
+
+  const text = data?.result?.content?.[0]?.text;
+  let parsed;
+  if (text) {
+    try { parsed = JSON.parse(text); }
+    catch { parsed = { raw: text }; }
+  } else {
+    parsed = data.result;
+  }
+
+  return { data: parsed, txHash };
 }
 
-async function sendTyping(chatId: number): Promise<void> {
-  await fetch(`${TG_API}/sendChatAction`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ chat_id: chatId, action: "typing" }),
-  });
-}
-
-interface TelegramUpdate {
-  update_id: number;
-  message?: {
-    message_id: number;
-    from: { id: number; first_name: string; username?: string };
-    chat: { id: number; type: string };
-    text?: string;
-    date: number;
-  };
+async function listMCPTools(): Promise<any[]> {
+  // GET /mcp is free (not x402-gated)
+  const res = await axios.get(`${MCP_SERVER}/mcp`);
+  return res.data?.result?.tools || [];
 }
 
 // ============================================================================
-// GROQ LLM BACKBONE
+// LLM (Groq)
 // ============================================================================
 
-const groq = new Groq({ apiKey: GROQ_API_KEY });
+const SYSTEM_PROMPT = `You are ShieldPay Agent (codename: OpenClaw), an autonomous DeFi security agent.
+You help users scan smart contracts for vulnerabilities using premium MCP security tools.
 
-const SYSTEM_PROMPT = `You are OpenClaw, a blockchain security AI assistant powered by ShieldPay.
-You help users analyze smart contracts for vulnerabilities, check wallet reputations, and manage spending policies.
+You have access to these security tools via ShieldPay's x402-paid MCP:
+- scan-contract: Full vulnerability scan ($0.001 USDC) - needs 'address' param
+- check-address: Address reputation check ($0.001 USDC) - needs 'address' param
+- threat-lookup: Threat intel lookup ($0.001 USDC) - needs 'indicator' param
 
-Available commands:
-- /scan <solidity code> — Scan a smart contract for vulnerabilities (pays 0.001 USDC via x402)
-- /reputation <address> — Check an address's on-chain reputation (pays 0.001 USDC via x402)
-- /policy — View your current spending policy
-- /status — Check ShieldPay system status
-- /help — Show available commands
+Payments are automatic via x402 on Base Sepolia. The agent wallet pays USDC.
 
-When users paste Solidity code or ask for a security scan, analyze it and provide clear, actionable results.
-When users ask general blockchain security questions, answer helpfully.
-Keep responses concise and use markdown formatting.`;
+When a user asks to scan or check something:
+1. Identify which tool to use
+2. Extract the address/indicator from their message
+3. Report back with the results in a clear, security-analyst style
 
-async function getLLMResponse(userMessage: string, username: string): Promise<string> {
+Always respond in the user's language. Be concise but thorough on security findings.
+Format vulnerability reports clearly with severity levels and recommendations.
+
+You are powered by Chainlink CRE for payment verification and on-chain attestation.`;
+
+async function askLLM(userMessage: string, context?: string): Promise<string> {
+  const messages: any[] = [
+    { role: 'system', content: SYSTEM_PROMPT },
+  ];
+
+  if (context) {
+    messages.push({ role: 'system', content: `MCP Tool Result:\n${context}` });
+  }
+
+  messages.push({ role: 'user', content: userMessage });
+
   const completion = await groq.chat.completions.create({
-    model: "meta-llama/llama-4-scout-17b-16e-instruct",
-    max_completion_tokens: 1024,
-    messages: [
-      { role: "system", content: SYSTEM_PROMPT },
-      { role: "user", content: `[User: ${username}] ${userMessage}` },
-    ],
+    model: LLM_MODEL,
+    messages,
+    temperature: 0.3,
+    max_tokens: 1500,
   });
 
-  return completion.choices[0]?.message?.content ?? "I couldn't generate a response. Please try again.";
-}
-
-// ============================================================================
-// x402 MCP CALLS (auto-payment via @x402/axios)
-// ============================================================================
-
-/**
- * Call the MCP server via x402 — payment is handled automatically.
- * If the server returns 402, @x402/axios signs the USDC payment and retries.
- * Returns the MCP result + payment txHash for CRE attestation.
- */
-async function callMcpTool(
-  toolName: string,
-  toolArgs: Record<string, unknown>,
-): Promise<{ result: string; txHash: string | null }> {
-  try {
-    const response = await mcpApi.post("/mcp", {
-      jsonrpc: "2.0",
-      method: "tools/call",
-      params: {
-        name: toolName,
-        arguments: toolArgs,
-      },
-      id: Date.now(),
-    });
-
-    // Extract payment receipt from response headers (set by x402 after payment)
-    let txHash: string | null = null;
-    const paymentResponseHeader = response.headers["x-payment-response"];
-    if (paymentResponseHeader) {
-      try {
-        const decoded = decodePaymentResponseHeader(paymentResponseHeader);
-        txHash = (decoded as any)?.txHash ?? (decoded as any)?.transaction ?? null;
-        console.log(`[OpenClaw] x402 payment settled — txHash: ${txHash}`);
-        console.log(`[OpenClaw] Full payment response:`, JSON.stringify(decoded));
-      } catch (e) {
-        console.log(`[OpenClaw] x402 payment header (raw): ${paymentResponseHeader}`);
-        txHash = paymentResponseHeader;
-      }
-    }
-
-    const mcpData = response.data;
-    const contentText = mcpData?.result?.content?.[0]?.text ?? "No content returned";
-
-    return { result: contentText, txHash };
-  } catch (err: any) {
-    console.error(`[OpenClaw] MCP call failed:`, err?.message ?? err);
-    throw err;
-  }
-}
-
-/**
- * Request a security scan via x402-paid MCP call.
- * Logs the txHash as paymentReceipt for CRE workflow.
- */
-async function requestSecurityScan(sourceCode: string): Promise<string> {
-  try {
-    const { result, txHash } = await callMcpTool("security_scan", {
-      source_code: sourceCode,
-      contract_name: "UserContract",
-    });
-
-    let output = result;
-
-    if (txHash) {
-      output += `\n\n---\n**x402 Payment TX:** \`${txHash}\``;
-      output += `\n**Agent Wallet:** \`${account.address}\``;
-      output += `\n**Network:** Base Sepolia`;
-
-      // Log for CRE workflow consumption
-      console.log(`[OpenClaw] === PAYMENT RECEIPT FOR CRE ===`);
-      console.log(`[OpenClaw] txHash: ${txHash}`);
-      console.log(`[OpenClaw] agent: ${account.address}`);
-      console.log(`[OpenClaw] tool: security_scan`);
-      console.log(`[OpenClaw] amount: 0.001 USDC`);
-      console.log(`[OpenClaw] ================================`);
-    }
-
-    return output;
-  } catch {
-    return "MCP server unreachable or payment failed. Check wallet balance on Base Sepolia.";
-  }
-}
-
-async function requestReputationCheck(address: string): Promise<string> {
-  try {
-    const { result, txHash } = await callMcpTool("reputation_check", { address });
-
-    let output = result;
-    if (txHash) {
-      output += `\n\n---\n**x402 Payment TX:** \`${txHash}\``;
-    }
-
-    return output;
-  } catch {
-    return "Reputation check failed. Check wallet balance on Base Sepolia.";
-  }
+  return completion.choices[0]?.message?.content || 'No response from LLM.';
 }
 
 // ============================================================================
 // COMMAND HANDLERS
 // ============================================================================
 
-async function handleMessage(chatId: number, text: string, username: string): Promise<void> {
-  await sendTyping(chatId);
+// /start
+bot.onText(/\/start/, async (msg) => {
+  const welcome = `*ShieldPay Agent (OpenClaw)*
 
-  // /start or /help
-  if (text === "/start" || text === "/help") {
-    await sendMessage(
-      chatId,
-      `*OpenClaw — ShieldPay Security Agent*\n\nCommands:\n/scan — Paste Solidity code to analyze (0.001 USDC)\n/reputation <address> — Check wallet reputation (0.001 USDC)\n/policy — View spending policy\n/status — System status\n\nPayments are automatic via x402 on Base Sepolia.\nOr just send me Solidity code and I'll scan it!`
-    );
-    return;
+Autonomous DeFi security scanner with x402 payments + CRE attestation.
+
+*Commands:*
+/scan \`0xAddress\` — Full vulnerability scan ($0.001)
+/check \`0xAddress\` — Address reputation ($0.001)
+/threat \`indicator\` — Threat intel lookup ($0.001)
+/tools — List available MCP tools
+/status — Agent status
+
+Or just describe what you need and I'll figure out the right tool.
+
+_Payments: x402 auto-pay (Base Sepolia USDC)_
+_Powered by Chainlink CRE + x402_`;
+
+  bot.sendMessage(msg.chat.id, welcome, { parse_mode: 'Markdown' });
+});
+
+// /tools
+bot.onText(/\/tools/, async (msg) => {
+  try {
+    const tools = await listMCPTools();
+    let text = '*Available MCP Tools:*\n\n';
+    for (const t of tools) {
+      text += `*${t.name}* — ${t.description}\n  ${t.price}\n\n`;
+    }
+    bot.sendMessage(msg.chat.id, text, { parse_mode: 'Markdown' });
+  } catch (e: any) {
+    bot.sendMessage(msg.chat.id, `Error connecting to MCP server: ${e.message}`);
   }
+});
 
-  // /status
-  if (text === "/status") {
-    await sendMessage(
-      chatId,
-      `*ShieldPay Status*\n\nAgent Wallet: \`${account.address}\`\nVault: \`${VAULT_ADDRESS}\`\nMCP Server: \`${MCP_SERVER_URL}\`\nCRE Workflow: \`${CRE_WORKFLOW_URL}\`\nNetwork: Base Sepolia\nPayment: x402 (USDC)`
+// /status
+bot.onText(/\/status/, async (msg) => {
+  let mcpStatus = 'Offline';
+  try {
+    const res = await axios.get(`${MCP_SERVER}/health`);
+    if (res.status === 200) mcpStatus = 'Online';
+  } catch {}
+
+  bot.sendMessage(msg.chat.id, `*ShieldPay Agent Status*
+
+Bot: Online
+LLM: Groq/${LLM_MODEL}
+MCP Server: ${mcpStatus}
+Agent Wallet: \`${account.address}\`
+x402 Payments: Enabled (Base Sepolia USDC)
+CRE Workflow: Simulation mode
+
+_Network: Base Sepolia (testnet)_`, { parse_mode: 'Markdown' });
+});
+
+// /scan <address>
+bot.onText(/\/scan\s+(0x[a-fA-F0-9]{40})/, async (msg, match) => {
+  const address = match![1];
+  const chatId = msg.chat.id;
+
+  bot.sendMessage(chatId, `*Scanning contract:* \`${address}\`\n\nRunning x402-paid ShieldPay scan...`, { parse_mode: 'Markdown' });
+
+  try {
+    const { data: result, txHash } = await callMCP('scan-contract', { address, chain: 'base' });
+
+    const analysis = await askLLM(
+      `Analyze this smart contract scan result and give me a security report for contract ${address}:`,
+      JSON.stringify(result, null, 2)
     );
-    return;
-  }
 
-  // /policy
-  if (text === "/policy") {
-    await sendMessage(
-      chatId,
-      `*Spending Policy*\n\nMax per call: 0.10 USDC\nMax daily: 5.00 USDC\nToday's spend: 0.00 USDC\nPayment: x402 auto-pay\n\n_Configure via ShieldVault.setPolicy()_`
-    );
-    return;
-  }
+    let header = `*ShieldPay Scan Report*
+Contract: \`${address}\`
+Risk Score: *${result.riskScore}/100* (${result.riskLevel})
+Vulnerabilities: ${result.vulnerabilities?.length || 0}
+${result.timestamp}`;
 
-  // /scan <code>
-  if (text.startsWith("/scan")) {
-    const code = text.replace("/scan", "").trim();
-    if (!code) {
-      await sendMessage(chatId, "Send me the Solidity source code after /scan.\n\nExample:\n`/scan pragma solidity ^0.8.0; contract Test { ... }`");
-      return;
+    if (txHash) {
+      header += `\nx402 Payment TX: \`${txHash}\``;
+
+      // Log payment receipt for CRE workflow
+      console.log(`[CRE-RECEIPT] txHash=${txHash} agent=${account.address} tool=scan-contract amount=0.001`);
     }
 
-    await sendMessage(chatId, "Scanning contract via x402-paid MCP server...");
-    const scanResult = await requestSecurityScan(code);
-    await sendMessage(chatId, scanResult);
-    return;
-  }
+    header += '\n\n---\n\n';
+    bot.sendMessage(chatId, header + analysis, { parse_mode: 'Markdown' });
 
-  // /reputation <address>
-  if (text.startsWith("/reputation")) {
-    const addr = text.replace("/reputation", "").trim();
-    if (!addr) {
-      await sendMessage(chatId, "Usage: `/reputation 0x...`");
-      return;
+  } catch (e: any) {
+    bot.sendMessage(chatId, `Scan failed: ${e.message}`);
+  }
+});
+
+// /check <address>
+bot.onText(/\/check\s+(0x[a-fA-F0-9]{40})/, async (msg, match) => {
+  const address = match![1];
+  const chatId = msg.chat.id;
+
+  bot.sendMessage(chatId, `Checking address reputation: \`${address}\`...`, { parse_mode: 'Markdown' });
+
+  try {
+    const { data: result, txHash } = await callMCP('check-address', { address });
+    const analysis = await askLLM(
+      `Give me a quick reputation report for address ${address}:`,
+      JSON.stringify(result, null, 2)
+    );
+
+    let response = `*Address Report*\n\`${address}\`\n\n${analysis}`;
+    if (txHash) {
+      response += `\n\n_x402 TX: \`${txHash}\`_`;
+      console.log(`[CRE-RECEIPT] txHash=${txHash} agent=${account.address} tool=check-address amount=0.001`);
     }
-    await sendMessage(chatId, "Checking reputation via x402-paid MCP...");
-    const repResult = await requestReputationCheck(addr);
-    await sendMessage(chatId, repResult);
-    return;
+
+    bot.sendMessage(chatId, response, { parse_mode: 'Markdown' });
+  } catch (e: any) {
+    bot.sendMessage(chatId, `Check failed: ${e.message}`);
   }
+});
 
-  // Detect Solidity code (no command prefix)
-  if (text.includes("pragma solidity") || text.includes("contract ") || (text.includes("function ") && text.includes("{"))) {
-    await sendMessage(chatId, "Detected Solidity code. Scanning via x402-paid MCP...");
-    const scanResult = await requestSecurityScan(text);
-    await sendMessage(chatId, scanResult);
-    return;
+// /threat <indicator>
+bot.onText(/\/threat\s+(.+)/, async (msg, match) => {
+  const indicator = match![1].trim();
+  const chatId = msg.chat.id;
+
+  bot.sendMessage(chatId, `Looking up threat intel for: \`${indicator}\`...`, { parse_mode: 'Markdown' });
+
+  try {
+    const { data: result, txHash } = await callMCP('threat-lookup', { indicator });
+    const analysis = await askLLM(
+      `Report threat intelligence results for ${indicator}:`,
+      JSON.stringify(result, null, 2)
+    );
+
+    let response = `*Threat Intel Report*\n\n${analysis}`;
+    if (txHash) {
+      response += `\n\n_x402 TX: \`${txHash}\`_`;
+      console.log(`[CRE-RECEIPT] txHash=${txHash} agent=${account.address} tool=threat-lookup amount=0.001`);
+    }
+
+    bot.sendMessage(chatId, response, { parse_mode: 'Markdown' });
+  } catch (e: any) {
+    bot.sendMessage(chatId, `Lookup failed: ${e.message}`);
   }
+});
 
-  // Default: send to Groq LLM
-  const response = await getLLMResponse(text, username);
-  await sendMessage(chatId, response);
-}
+// Free-text: use LLM to figure out intent
+bot.on('message', async (msg) => {
+  if (!msg.text || msg.text.startsWith('/')) return;
 
-// ============================================================================
-// POLLING LOOP
-// ============================================================================
+  const chatId = msg.chat.id;
+  const userText = msg.text;
 
-async function pollUpdates(): Promise<void> {
-  let offset = 0;
-  console.log("[OpenClaw] Bot started. Polling for updates...");
+  const addressMatch = userText.match(/0x[a-fA-F0-9]{40}/);
 
-  while (true) {
-    try {
-      const res = await fetch(`${TG_API}/getUpdates?offset=${offset}&timeout=30`);
-      const data = (await res.json()) as { ok: boolean; result: TelegramUpdate[] };
+  try {
+    if (addressMatch) {
+      bot.sendMessage(chatId, `Analyzing your request...`);
 
-      if (!data.ok || !data.result?.length) continue;
+      if (/scan|vuln|audit|secur|analyz|review/i.test(userText)) {
+        const { data: result, txHash } = await callMCP('scan-contract', { address: addressMatch[0] });
+        const analysis = await askLLM(
+          `The user asked: "${userText}". Here are the scan results for ${addressMatch[0]}. Give a clear report:`,
+          JSON.stringify(result, null, 2)
+        );
 
-      for (const update of data.result) {
-        offset = update.update_id + 1;
-
-        if (update.message?.text) {
-          const { chat, text, from } = update.message;
-          console.log(`[OpenClaw] ${from.username ?? from.first_name}: ${text.slice(0, 100)}`);
-
-          handleMessage(chat.id, text, from.username ?? from.first_name).catch((err) =>
-            console.error("[OpenClaw] Error handling message:", err)
-          );
+        let response = `*Security Report*\n\`${addressMatch[0]}\`\n\n${analysis}`;
+        if (txHash) {
+          response += `\n\n_x402 TX: \`${txHash}\`_`;
+          console.log(`[CRE-RECEIPT] txHash=${txHash} agent=${account.address} tool=scan-contract amount=0.001`);
         }
+
+        bot.sendMessage(chatId, response, { parse_mode: 'Markdown' });
+      } else {
+        const intent = await askLLM(
+          `User says: "${userText}". They mentioned address ${addressMatch[0]}. What should I do? Just scan the contract if they want security analysis, check the address if they want reputation, or do a threat lookup. Respond with your analysis.`,
+        );
+        bot.sendMessage(chatId, intent, { parse_mode: 'Markdown' });
       }
-    } catch (err) {
-      console.error("[OpenClaw] Polling error:", err);
-      await new Promise((r) => setTimeout(r, 5000));
+    } else {
+      const response = await askLLM(userText);
+      bot.sendMessage(chatId, response, { parse_mode: 'Markdown' });
     }
+  } catch (e: any) {
+    bot.sendMessage(chatId, `Error: ${e.message}`);
   }
-}
+});
 
-// ============================================================================
-// ENTRYPOINT
-// ============================================================================
-
-console.log("[OpenClaw] ShieldPay Telegram Bot Agent v0.2.0");
-console.log("[OpenClaw] LLM: Groq (llama-4-scout)");
-console.log("[OpenClaw] Payments: x402 auto-pay (Base Sepolia USDC)");
-console.log("[OpenClaw] Agent wallet:", account.address);
-console.log("[OpenClaw] MCP Server:", MCP_SERVER_URL);
-console.log("[OpenClaw] Vault:", VAULT_ADDRESS);
-
-pollUpdates().catch(console.error);
+console.log('ShieldPay Agent is running. Send /start to your Telegram bot.');

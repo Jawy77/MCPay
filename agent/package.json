@@ -1,21 +1,25 @@
 {
   "name": "shieldpay-agent",
   "version": "0.1.0",
-  "description": "OpenClaw: Telegram bot agent using ShieldPay SDK with Groq backbone",
+  "description": "OpenClaw Telegram bot with ShieldPay CRE-verified MCP calls",
   "type": "module",
   "scripts": {
-    "start": "bun run src/telegram-bot.ts",
-    "dev": "bun --watch run src/telegram-bot.ts"
+    "start": "npx tsx src/telegram-bot.ts",
+    "dev": "npx tsx watch src/telegram-bot.ts"
   },
   "dependencies": {
+    "node-telegram-bot-api": "^0.66.0",
     "groq-sdk": "^0.12.0",
     "axios": "^1.7.0",
     "@x402/axios": "^2.6.0",
     "@x402/evm": "^2.6.0",
-    "viem": "^2.21.0"
+    "viem": "^2.21.0",
+    "dotenv": "^16.4.0"
   },
   "devDependencies": {
-    "@types/bun": "^1.2.0",
+    "tsx": "^4.19.0",
+    "@types/node-telegram-bot-api": "^0.64.0",
+    "@types/node": "^22.0.0",
     "typescript": "^5.5.0"
   }
 }
