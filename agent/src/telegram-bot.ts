@@ -64,6 +64,33 @@ console.log(`   Payments: x402 auto-pay (Base Sepolia USDC)`);
 console.log(`   Bot: Starting Telegram polling...\n`);
 
 // ============================================================================
+// USDC BALANCE HELPER
+// ============================================================================
+
+const USDC_ADDRESS = '0x036CbD53842c5426634e7929541eC2318f3dCF7e';
+const USDC_ABI = [{ inputs: [{ name: 'account', type: 'address' }], name: 'balanceOf', outputs: [{ type: 'uint256' }], stateMutability: 'view', type: 'function' }] as const;
+
+async function getUSDCBalance(): Promise<string> {
+  try {
+    const balance = await publicClient.readContract({
+      address: USDC_ADDRESS,
+      abi: USDC_ABI,
+      functionName: 'balanceOf',
+      args: [account.address],
+    });
+    return (Number(balance) / 1e6).toFixed(4);
+  } catch {
+    return '?.??';
+  }
+}
+
+async function sendPaymentNotification(chatId: number, tool: string, txHash: string | null) {
+  const balance = await getUSDCBalance();
+  const txShort = txHash ? txHash.slice(0, 18) + '...' : 'n/a';
+  bot.sendMessage(chatId, `MCPay: Paid 0.001 USDC for ${tool}. TX: \`${txShort}\` Balance: ${balance} USDC`, { parse_mode: 'Markdown' });
+}
+
+// ============================================================================
 // MCP CLIENT (x402-paid)
 // ============================================================================
 
@@ -243,9 +270,8 @@ ${result.timestamp}`;
 
     if (txHash) {
       header += `\nx402 Payment TX: \`${txHash}\``;
-
-      // Log payment receipt for CRE workflow
       console.log(`[CRE-RECEIPT] txHash=${txHash} agent=${account.address} tool=scan-contract amount=0.001`);
+      sendPaymentNotification(chatId, 'scan-contract', txHash);
     }
 
     header += '\n\n---\n\n';
@@ -274,6 +300,7 @@ bot.onText(/\/check\s+(0x[a-fA-F0-9]{40})/, async (msg, match) => {
     if (txHash) {
       response += `\n\n_x402 TX: \`${txHash}\`_`;
       console.log(`[CRE-RECEIPT] txHash=${txHash} agent=${account.address} tool=check-address amount=0.001`);
+      sendPaymentNotification(chatId, 'check-address', txHash);
     }
 
     bot.sendMessage(chatId, response, { parse_mode: 'Markdown' });
@@ -300,6 +327,7 @@ bot.onText(/\/threat\s+(.+)/, async (msg, match) => {
     if (txHash) {
       response += `\n\n_x402 TX: \`${txHash}\`_`;
       console.log(`[CRE-RECEIPT] txHash=${txHash} agent=${account.address} tool=threat-lookup amount=0.001`);
+      sendPaymentNotification(chatId, 'threat-lookup', txHash);
     }
 
     bot.sendMessage(chatId, response, { parse_mode: 'Markdown' });
@@ -332,6 +360,7 @@ bot.on('message', async (msg) => {
         if (txHash) {
           response += `\n\n_x402 TX: \`${txHash}\`_`;
           console.log(`[CRE-RECEIPT] txHash=${txHash} agent=${account.address} tool=scan-contract amount=0.001`);
+          sendPaymentNotification(chatId, 'scan-contract', txHash);
         }
 
         bot.sendMessage(chatId, response, { parse_mode: 'Markdown' });

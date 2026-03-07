@@ -10,32 +10,37 @@ app.use(express.json());
 const PORT = process.env.MCP_PORT || 3001;
 const PAYEE_ADDRESS = process.env.PAYEE_WALLET_ADDRESS || '0x0000000000000000000000000000000000000000';
 const FACILITATOR_URL = process.env.FACILITATOR_URL || 'https://x402.org/facilitator';
+const MOCK_PAYMENTS = process.env.MOCK_PAYMENTS !== 'false'; // true by default for dev
 
 // ============================================================================
-// x402 PAYMENT MIDDLEWARE — Base Sepolia USDC
+// x402 PAYMENT MIDDLEWARE — Base Sepolia USDC (skipped in mock mode)
 // ============================================================================
 
-const facilitatorClient = new HTTPFacilitatorClient({ url: FACILITATOR_URL });
-const resourceServer = new x402ResourceServer(facilitatorClient)
-  .register('eip155:84532', new ExactEvmScheme());
+if (!MOCK_PAYMENTS) {
+  const facilitatorClient = new HTTPFacilitatorClient({ url: FACILITATOR_URL });
+  const resourceServer = new x402ResourceServer(facilitatorClient)
+    .register('eip155:84532', new ExactEvmScheme());
 
-app.use(
-  paymentMiddleware(
-    {
-      'POST /mcp': {
-        accepts: {
-          scheme: 'exact',
-          price: '$0.001',
-          network: 'eip155:84532',      // Base Sepolia
-          payTo: PAYEE_ADDRESS,
-          maxTimeoutSeconds: 120,
+  app.use(
+    paymentMiddleware(
+      {
+        'POST /mcp': {
+          accepts: {
+            scheme: 'exact',
+            price: '$0.001',
+            network: 'eip155:84532',      // Base Sepolia
+            payTo: PAYEE_ADDRESS,
+            maxTimeoutSeconds: 120,
+          },
+          description: 'Premium smart contract security scan via ShieldPay MCP',
         },
-        description: 'Premium smart contract security scan via ShieldPay MCP',
       },
-    },
-    resourceServer,
-  ),
-);
+      resourceServer,
+    ),
+  );
+} else {
+  console.log('  MOCK_PAYMENTS=true — x402 payment gate DISABLED for dev');
+}
 
 // ============================================================================
 // SIMULATED SECURITY SCAN RESULTS
@@ -258,7 +263,7 @@ app.get('/health', (_req, res) => {
 app.listen(PORT, () => {
   console.log(`\n  ShieldPay Demo MCP Server`);
   console.log(`   Port: ${PORT}`);
-  console.log(`   x402: ENABLED (Base Sepolia USDC)`);
+  console.log(`   Mode: ${MOCK_PAYMENTS ? 'MOCK (no x402 gate)' : 'LIVE (x402 USDC)'}`);
   console.log(`   Payee: ${PAYEE_ADDRESS}`);
   console.log(`   Facilitator: ${FACILITATOR_URL}`);
   console.log(`   Tools: scan-contract, check-address, threat-lookup`);
