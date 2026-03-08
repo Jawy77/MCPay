@@ -1,7 +1,7 @@
 {
-  "name": "shieldpay-agent",
+  "name": "mcpay-agent",
   "version": "0.1.0",
-  "description": "OpenClaw Telegram bot with ShieldPay CRE-verified MCP calls",
+  "description": "MCPay Telegram bot — calls backend /api/buy for verified MCP tool purchases",
   "type": "module",
   "scripts": {
     "start": "npx tsx src/telegram-bot.ts",
@@ -11,9 +11,6 @@
     "node-telegram-bot-api": "^0.66.0",
     "groq-sdk": "^0.12.0",
     "axios": "^1.7.0",
-    "@x402/axios": "^2.6.0",
-    "@x402/evm": "^2.6.0",
-    "viem": "^2.21.0",
     "dotenv": "^16.4.0"
   },
   "devDependencies": {
