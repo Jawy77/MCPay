@@ -199,9 +199,11 @@ export default function Home() {
     } catch (e: any) {
       log('error', `Backend error: ${e.message}`)
       // Fallback: mark remaining steps as error
-      for (const id of ['preflight', 'payment', 'execute', 'validate', 'attest']) {
-        upd(id, (prev: any) => prev?.status === 'pending' ? { status: 'error' as StepStatus, detail: 'Backend unreachable' } : {})
-      }
+      setSteps(prev => prev.map(s =>
+        ['preflight', 'payment', 'execute', 'validate', 'attest'].includes(s.id) && s.status === 'pending'
+          ? { ...s, status: 'error' as StepStatus, detail: 'Backend unreachable' }
+          : s
+      ))
     }
 
     if (ws) ws.close()
