@@ -1,7 +1,7 @@
 {
   "name": "mcpay-backend",
   "version": "0.1.0",
-  "description": "MCPay Backend API: x402 payment orchestration + WebSocket flow events",
+  "description": "MCPay Backend API: payment orchestration + WebSocket flow events",
   "type": "module",
   "scripts": {
     "start": "npx tsx src/api.ts",
@@ -11,12 +11,7 @@
     "express": "^4.21.0",
     "cors": "^2.8.5",
     "ws": "^8.18.0",
-    "ethers": "^6.13.0",
-    "dotenv": "^16.4.0",
-    "axios": "^1.7.0",
-    "@x402/axios": "^2.6.0",
-    "@x402/evm": "^2.6.0",
-    "viem": "^2.21.0"
+    "dotenv": "^16.4.0"
   },
   "devDependencies": {
     "tsx": "^4.19.0",
