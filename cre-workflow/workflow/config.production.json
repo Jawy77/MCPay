@@ -1,8 +1,0 @@
-{
-  "httpTriggerPath": "/shield-verify",
-  "shieldVaultAddress": "0x0000000000000000000000000000000000000000",
-  "baseSepoliaChainSelector": "10344971235874465080",
-  "mcpServerUrl": "https://shieldpay-mcp.mantishield.com/mcp",
-  "facilitatorUrl": "https://x402-facilitator.cdp.coinbase.com",
-  "gasLimit": 300000
-}
