@@ -5,6 +5,9 @@ import { WebSocketServer, WebSocket } from 'ws';
 import { config } from 'dotenv';
 import { resolve } from 'path';
 import crypto from 'crypto';
+import { createThirdwebClient } from 'thirdweb';
+import { createAuth } from 'thirdweb/auth';
+import { privateKeyToAccount } from 'thirdweb/wallets';
 
 config({ path: resolve(import.meta.dirname ?? '.', '..', '.env') });
 
@@ -16,6 +19,33 @@ const PORT = parseInt(process.env.PORT || '4000');
 const MCP_SERVER_URL = process.env.MCP_SERVER_URL || 'http://localhost:3001/mcp';
 const MOCK_PAYMENTS = process.env.MOCK_PAYMENTS !== 'false';
 const CORS_ORIGIN = (process.env.CORS_ORIGIN || 'http://localhost:3000').split(',').map(s => s.trim());
+const THIRDWEB_SECRET_KEY = process.env.THIRDWEB_SECRET_KEY || '';
+const AUTH_DOMAIN = process.env.AUTH_DOMAIN || 'mcpay.vercel.app';
+const ADMIN_PRIVATE_KEY = process.env.ADMIN_PRIVATE_KEY || process.env.AGENT_PRIVATE_KEY || '';
+
+// ============================================================================
+// THIRDWEB CLIENT + AUTH
+// ============================================================================
+
+const thirdwebClient = createThirdwebClient({
+  secretKey: THIRDWEB_SECRET_KEY || 'placeholder',
+});
+
+let thirdwebAuth: ReturnType<typeof createAuth> | null = null;
+
+if (THIRDWEB_SECRET_KEY && ADMIN_PRIVATE_KEY) {
+  thirdwebAuth = createAuth({
+    domain: AUTH_DOMAIN,
+    client: thirdwebClient,
+    adminAccount: privateKeyToAccount({ client: thirdwebClient, privateKey: ADMIN_PRIVATE_KEY as `0x${string}` }),
+  });
+  console.log(`  [thirdweb] Auth enabled (domain: ${AUTH_DOMAIN})`);
+} else {
+  console.log('  [thirdweb] Auth disabled — THIRDWEB_SECRET_KEY or ADMIN_PRIVATE_KEY not set');
+}
+
+// In-memory session store (JWT -> wallet address)
+const sessions = new Map<string, { address: string; issuedAt: number }>();
 
 // ============================================================================
 // MCP STORE — Tools the frontend renders
@@ -63,7 +93,7 @@ const dailySpentByAddress = new Map<string, number>();
 let attestationIdCounter = 0;
 
 // Seed some mock attestations for demo wallet
-const DEMO_WALLET = '0x742d35Cc6634C0532925a3b844Bc9e7595f2bD18';
+const DEMO_WALLET = '0x5D5071eC30a81304847f0374C1d559d8e499d057';
 attestationsByAddress.set(DEMO_WALLET.toLowerCase(), [
   { id: attestationIdCounter++, tool: 'scan-contract', amount: '0.001', quality: 85, status: 'verified', timestamp: new Date(Date.now() - 3600_000).toISOString() },
   { id: attestationIdCounter++, tool: 'check-address', amount: '0.001', quality: 92, status: 'verified', timestamp: new Date(Date.now() - 7200_000).toISOString() },
@@ -126,13 +156,97 @@ async function callMcpServer(tool: string, args: Record<string, unknown>): Promi
   return res.json();
 }
 
+// Extract wallet address from Authorization header (JWT)
+function getAuthWallet(req: express.Request): string | null {
+  const authHeader = req.headers.authorization;
+  if (!authHeader?.startsWith('Bearer ')) return null;
+  const token = authHeader.slice(7);
+  const session = sessions.get(token);
+  if (!session) return null;
+  // Sessions expire after 24h
+  if (Date.now() - session.issuedAt > 86400_000) {
+    sessions.delete(token);
+    return null;
+  }
+  return session.address;
+}
+
+// ============================================================================
+// AUTH ROUTES — thirdweb SIWE (Sign In With Ethereum)
+// ============================================================================
+
+// Step 1: Frontend requests a login payload for the connected wallet
+app.post('/api/auth/payload', async (req, res) => {
+  const { address } = req.body;
+  if (!address) {
+    return res.status(400).json({ error: 'Missing "address" in request body' });
+  }
+
+  if (!thirdwebAuth) {
+    // Fallback: return a simple payload when thirdweb is not configured
+    return res.json({
+      payload: {
+        domain: AUTH_DOMAIN,
+        address,
+        statement: 'Sign in to MCPay',
+        nonce: crypto.randomBytes(16).toString('hex'),
+        issued_at: new Date().toISOString(),
+        expiration_time: new Date(Date.now() + 300_000).toISOString(),
+      },
+    });
+  }
+
+  const payload = await thirdwebAuth.generatePayload({ address });
+  res.json({ payload });
+});
+
+// Step 2: Frontend signs the payload and sends signature for verification
+app.post('/api/auth/login', async (req, res) => {
+  const { payload, signature } = req.body;
+  if (!payload || !signature) {
+    return res.status(400).json({ error: 'Missing "payload" or "signature"' });
+  }
+
+  if (!thirdwebAuth) {
+    // Fallback: trust the address when thirdweb is not configured (dev mode)
+    const address = payload.address || payload.payload?.address;
+    const token = crypto.randomBytes(32).toString('hex');
+    sessions.set(token, { address: address.toLowerCase(), issuedAt: Date.now() });
+    return res.json({ token, address });
+  }
+
+  const verifiedPayload = await thirdwebAuth.verifyPayload({ payload, signature });
+  if (!verifiedPayload.valid) {
+    return res.status(401).json({ error: 'Invalid signature' });
+  }
+
+  const jwt = await thirdwebAuth.generateJWT({ payload: verifiedPayload.payload });
+  const address = verifiedPayload.payload.address.toLowerCase();
+  sessions.set(jwt, { address, issuedAt: Date.now() });
+
+  res.json({ token: jwt, address });
+});
+
+// Step 3: Verify session
+app.get('/api/auth/session', (req, res) => {
+  const wallet = getAuthWallet(req);
+  if (!wallet) {
+    return res.status(401).json({ authenticated: false });
+  }
+  res.json({ authenticated: true, address: wallet });
+});
+
 // ============================================================================
 // ROUTES
 // ============================================================================
 
 // GET /api/health
 app.get('/api/health', (_req, res) => {
-  res.json({ status: 'ok' });
+  res.json({
+    status: 'ok',
+    thirdweb: !!thirdwebAuth,
+    mock: MOCK_PAYMENTS,
+  });
 });
 
 // GET /api/store
@@ -179,6 +293,10 @@ app.post('/api/buy', async (req, res) => {
     return res.status(400).json({ error: `Unknown tool: ${tool}` });
   }
 
+  // Wallet: from auth session, request body, or demo default
+  const authWallet = getAuthWallet(req);
+  const agentAddr = (authWallet || req.body.agentAddress || DEMO_WALLET).toLowerCase();
+
   const toolArgs = args || {};
   const startTime = Date.now();
 
@@ -209,7 +327,6 @@ app.post('/api/buy', async (req, res) => {
       try { mcpResponse = JSON.parse(contentText); }
       catch { mcpResponse = { raw: contentText }; }
     } catch {
-      // MCP server not running — generate mock response
       mcpResponse = generateMockMcpResponse(tool, toolArgs);
     }
 
@@ -220,7 +337,7 @@ app.post('/api/buy', async (req, res) => {
     broadcast({ step: 'validate', status: 'running', detail: 'Validating service quality via CRE...' });
     await sleep(500);
 
-    const qualityScore = 75 + Math.floor(Math.random() * 25); // 75-99
+    const qualityScore = 75 + Math.floor(Math.random() * 25);
     broadcast({ step: 'validate', status: 'success', detail: `Quality score: ${qualityScore}/100`, duration: Date.now() - t4 });
 
     // ── Step 5: ATTEST ON-CHAIN ────────────────────────────────────────
@@ -232,7 +349,6 @@ app.post('/api/buy', async (req, res) => {
     broadcast({ step: 'attest', status: 'success', detail: `Attestation TX: ${attestationTx.slice(0, 18)}...`, duration: Date.now() - t5 });
 
     // ── Store attestation in memory ────────────────────────────────────
-    const agentAddr = (req.body.agentAddress || DEMO_WALLET).toLowerCase();
     if (!attestationsByAddress.has(agentAddr)) attestationsByAddress.set(agentAddr, []);
     attestationsByAddress.get(agentAddr)!.push({
       id: attestationIdCounter++,
@@ -243,17 +359,14 @@ app.post('/api/buy', async (req, res) => {
       timestamp: new Date().toISOString(),
     });
 
-    // Track daily spend
     const prevSpent = dailySpentByAddress.get(agentAddr) || 0;
     dailySpentByAddress.set(agentAddr, prevSpent + parseFloat(toolInfo.price));
 
-    // Increment attestation count on the store tool
     const storeEntry = MCP_STORE.find(t => t.name === tool);
     if (storeEntry) storeEntry.attestations++;
 
-    console.log(`[BUY] ${tool} | quality=${qualityScore} | ${Date.now() - startTime}ms`);
+    console.log(`[BUY] ${tool} | wallet=${agentAddr.slice(0,10)} | quality=${qualityScore} | ${Date.now() - startTime}ms`);
 
-    // ── Response ───────────────────────────────────────────────────────
     res.json({
       success: true,
       tool,
@@ -323,11 +436,12 @@ function generateMockMcpResponse(tool: string, args: Record<string, unknown>): a
 server.listen(PORT, () => {
   console.log(`\n  MCPay Backend API`);
   console.log(`  ─────────────────────────────────`);
-  console.log(`  Port:    ${PORT}`);
-  console.log(`  Mode:    ${MOCK_PAYMENTS ? 'MOCK (simulated payments)' : 'LIVE (Base Sepolia)'}`);
-  console.log(`  CORS:    ${CORS_ORIGIN.join(', ')}`);
-  console.log(`  MCP:     ${MCP_SERVER_URL}`);
-  console.log(`  WS:      ws://localhost:${PORT}/ws/flow`);
-  console.log(`  Health:  http://localhost:${PORT}/api/health`);
-  console.log(`  Store:   http://localhost:${PORT}/api/store\n`);
+  console.log(`  Port:      ${PORT}`);
+  console.log(`  Mode:      ${MOCK_PAYMENTS ? 'MOCK (simulated payments)' : 'LIVE (Base Sepolia)'}`);
+  console.log(`  CORS:      ${CORS_ORIGIN.join(', ')}`);
+  console.log(`  MCP:       ${MCP_SERVER_URL}`);
+  console.log(`  Thirdweb:  ${thirdwebAuth ? 'ENABLED' : 'disabled (no keys)'}`);
+  console.log(`  WS:        ws://localhost:${PORT}/ws/flow`);
+  console.log(`  Health:    http://localhost:${PORT}/api/health`);
+  console.log(`  Store:     http://localhost:${PORT}/api/store\n`);
 });

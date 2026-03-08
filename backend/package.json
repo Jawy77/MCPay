@@ -1,7 +1,7 @@
 {
   "name": "mcpay-backend",
   "version": "0.1.0",
-  "description": "MCPay Backend API: payment orchestration + WebSocket flow events",
+  "description": "MCPay Backend API: payment orchestration + WebSocket flow events + thirdweb auth",
   "type": "module",
   "scripts": {
     "start": "npx tsx src/api.ts",
@@ -11,7 +11,8 @@
     "express": "^4.21.0",
     "cors": "^2.8.5",
     "ws": "^8.18.0",
-    "dotenv": "^16.4.0"
+    "dotenv": "^16.4.0",
+    "thirdweb": "^5.80.0"
   },
   "devDependencies": {
     "tsx": "^4.19.0",
