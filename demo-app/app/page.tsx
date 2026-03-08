@@ -1,5 +1,6 @@
 'use client'
 import { useState, useEffect, useRef } from 'react'
+import { buyTool } from '../lib/api'
 type StepStatus = 'pending' | 'running' | 'success' | 'error'
 interface PipeStep { id: string; label: string; icon: string; capability: string; status: StepStatus; detail: string; txHash?: string; duration?: number }
 interface LogEntry { timestamp: string; level: 'info' | 'warn' | 'success' | 'error' | 'payment'; message: string }
@@ -149,6 +150,7 @@ export default function Home() {
     await d(500)
     log('success', '══════ SHIELDPAY VERIFICATION COMPLETE ══════')
     log('success', 'Agent paid 0.05 USDC | Service verified | Proof on-chain')
+    buyTool('scan-contract', { address: '0xdead000000000000000000000000000000000001' }).catch(console.error)
     setRunning(false); setDone(true); setShowRes(true)
   }
 
