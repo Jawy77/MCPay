@@ -158,6 +158,12 @@ app.post('/mcp', (req, res) => {
     const toolName = params?.name;
     const args = params?.arguments || {};
 
+    // Set X-MCPay-Price header so backend/agents know the tool cost
+    const toolMeta = MCP_TOOLS.find(t => t.name === toolName);
+    if (toolMeta) {
+      res.setHeader('X-MCPay-Price', toolMeta.price);
+    }
+
     // ---- scan-contract ----
     if (toolName === 'scan-contract') {
       const address = args.address || '0x0000000000000000000000000000000000000000';
