@@ -1,5 +1,5 @@
 {
-  "shieldVaultAddress": "0x0000000000000000000000000000000000000000",
+  "shieldVaultAddress": "0xDc5E9afCCb596c4e9ce281F1B8C07052ab0e4FAB",
   "baseSepoliaChainSelector": "10344971235874465080",
   "mcpServerUrl": "http://54.221.19.241:3001/mcp",
   "facilitatorUrl": "https://x402-facilitator.cdp.coinbase.com",

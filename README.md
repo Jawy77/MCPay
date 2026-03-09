@@ -27,6 +27,7 @@ The result: every agent payment has an on-chain receipt proving both payment AND
 | **Frontend** | [v0-mcp-ay-payment-gateway.vercel.app](https://v0-mcp-ay-payment-gateway.vercel.app) |
 | **Backend API** | [54.221.19.241:4000](http://54.221.19.241:4000/api/health) |
 | **Agent Wallet** | [0x7919...0A9A on BaseScan](https://sepolia.basescan.org/address/0x7919b7b50c35121Ab2cD7EAdcB2B467E1deE0A9A) |
+| **ShieldVault Contract** | [0xDc5E9afCCb596c4e9ce281F1B8C07052ab0e4FAB](https://sepolia.basescan.org/address/0xDc5E9afCCb596c4e9ce281F1B8C07052ab0e4FAB) |
 | **Network** | Base Sepolia (chainId 84532) |
 | **USDC Contract** | [0x036CbD53842c5426634e7929541eC2318f3dCF7e](https://sepolia.basescan.org/token/0x036CbD53842c5426634e7929541eC2318f3dCF7e) |
 
