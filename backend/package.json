@@ -8,18 +8,23 @@
     "dev": "npx tsx watch src/api.ts"
   },
   "dependencies": {
-    "express": "^4.21.0",
+    "@x402/axios": "^2.6.0",
+    "@x402/core": "^2.6.0",
+    "@x402/evm": "^2.6.0",
+    "axios": "^1.13.6",
     "cors": "^2.8.5",
-    "ws": "^8.18.0",
     "dotenv": "^16.4.0",
-    "thirdweb": "^5.80.0"
+    "express": "^4.21.0",
+    "thirdweb": "^5.80.0",
+    "viem": "^2.47.0",
+    "ws": "^8.18.0"
   },
   "devDependencies": {
-    "tsx": "^4.19.0",
-    "@types/express": "^5.0.0",
     "@types/cors": "^2.8.17",
-    "@types/ws": "^8.5.0",
+    "@types/express": "^5.0.0",
     "@types/node": "^22.0.0",
+    "@types/ws": "^8.5.0",
+    "tsx": "^4.19.0",
     "typescript": "^5.5.0"
   }
 }
